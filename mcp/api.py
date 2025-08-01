@@ -1,28 +1,29 @@
 from fastapi import FastAPI, Query
 from mcp.tools import thepusherrr, spotify
+from fastapi.openapi.utils import get_openapi
 
-app = FastAPI(title="MCP API", description="Multi-Control Panel API", version="1.0.0")
+app = FastAPI(
+    title="MCP (Multi-Control Panel) API",
+    description="An interface to control Spotify and send notifications. You can play playlists, tracks, start radios, resume/skip, get current song, and push custom messages.",
+    version="1.0.0",
+)
 
 @app.get("/", summary="Root")
 def root():
     """Health check endpoint."""
     return {"status": "MCP API is running"}
 
-@app.get("/notify", summary="Send Notification", description="Send a push notification message to a Pushover-connected device.")
+@app.get("/notify", summary="Send Notification", description="Send a push notification message to a Pushover-registered device.")
 def notify(msg: str = Query("hello world", description="Message to send via Pushover")):
-    """Send a push notification using Pushover."""
     result = thepusherrr.send_notification("MCP Notification", msg)
     return {"message_sent": msg, "result": result}
 
-@app.get("/song", summary="Get Current Song", description="Retrieve the currently playing song on Spotify along with the artist name.")
+@app.get("/song", summary="Get Current Song", description="Retrieve the currently playing Spotify song.")
 def current_song():
-    """Retrieve the currently playing Spotify song."""
     song, artist = spotify.get_current_song()
     if song and artist:
         return {"song": song, "artist": artist}
     return {"message": "No song currently playing"}
-
-from fastapi.openapi.utils import get_openapi
 
 @app.get("/play", summary="Play a Spotify playlist", description="Start playback from a given Spotify playlist URI.")
 def play(playlist: str = Query(..., description="Spotify playlist URI (e.g., spotify:playlist:37i9dQZF1DXcBWIGoYBM5M)")):
@@ -44,6 +45,7 @@ def play_track(track: str = Query(..., description="Spotify track URI (e.g., spo
 def resume():
     return spotify.resume_playback()
 
+# === OpenAPI customization ===
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
@@ -62,7 +64,7 @@ You can:
         routes=app.routes,
     )
     openapi_schema["servers"] = [
-        {"url": "https://9fbd00630987.ngrok-free.app"}  # 👈 Add your ngrok URL here
+        {"url": "https://notificationspotifymcp.onrender.com"}  # <- replace with your actual Render URL
     ]
     app.openapi_schema = openapi_schema
     return app.openapi_schema
