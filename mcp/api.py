@@ -1,18 +1,19 @@
-from fastapi import FastAPI, Query
-from typing import Optional
-from mcp.tools import thepusherrr, spotify
-from fastapi.openapi.utils import get_openapi
-from fastapi.responses import PlainTextResponse
-from fastapi import Request
-from mcp.tools.spotify import get_spotify_client
-from spotipy.oauth2 import SpotifyOAuth
 import os
+from fastapi import FastAPI, Query
+from fastapi.responses import PlainTextResponse
+from fastapi.openapi.utils import get_openapi
+from spotipy.oauth2 import SpotifyOAuth
+from typing import Optional
+
+from mcp.tools import thepusherrr, spotify
+from mcp.config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECT_URI, validate as validate_spotify_config
 
 app = FastAPI(
     title="MCP (Multi-Control Panel) API",
     description="An interface to control Spotify and send notifications. You can play playlists, tracks, start radios, resume/skip, get current song, and push custom messages.",
     version="1.0.0",
 )
+
 
 
 
@@ -27,8 +28,27 @@ def auth_start():
         cache_path=os.path.join(os.getcwd(), "mcp_spotify_token_cache"),
         show_dialog=True,
     )
+    # Fail fast if config missing to give clearer error
+    try:
+        validate_spotify_config()
+    except Exception as e:
+        # This will show up in logs if config is incomplete
+        print("Spotify config validation error:", e)
     auth_url = auth_manager.get_authorize_url()
     return {"auth_url": auth_url}
+
+@app.get("/auth/callback", summary="Spotify OAuth callback", description="Callback endpoint Spotify redirects to after user authorizes.")
+def auth_callback(code: str):
+    auth_manager = SpotifyOAuth(
+        client_id=SPOTIFY_CLIENT_ID,
+        client_secret=SPOTIFY_CLIENT_SECRET,
+        redirect_uri=SPOTIFY_REDIRECT_URI,
+        scope="user-read-playback-state user-modify-playback-state playlist-read-private playlist-modify-private playlist-modify-public user-read-private",
+        cache_path=os.path.join(os.getcwd(), "mcp_spotify_token_cache"),
+        show_dialog=False,
+    )
+    token_info = auth_manager.get_access_token(code, as_dict=True)
+    return {"status": "authenticated", "token_info": token_info}
 
 
 @app.get("/auth/callback", summary="Spotify OAuth callback", description="Callback endpoint Spotify redirects to after user authorizes.")
@@ -90,9 +110,17 @@ def resume():
 # === New endpoints for advanced Spotify control ===
 @app.get("/search", summary="Search Tracks", description="Search Spotify for tracks matching a query.")
 def search(query: str = Query(..., description="Search query string (e.g., 'lofi beats')")):
-    tracks = spotify.search_tracks(query)
-    # return minimal info for LLM consumption
-    return {"tracks": [{"name": t.get('name'), "artists": [a.get('name') for a in t.get('artists', [])], "uri": t.get('uri')} for t in tracks]}
+    tracks = spotify.search_tracks(query) or []
+    return {
+        "tracks": [
+            {
+                "name": t.get("name"),
+                "artists": [a.get("name") for a in t.get("artists", [])],
+                "uri": t.get("uri"),
+            }
+            for t in tracks
+        ]
+    }
 
 @app.get("/recommend", summary="Get Recommendations", description="Get recommended tracks based on seed tracks, artists, or genres. Provide comma-separated lists.")
 def recommend(seed_tracks: Optional[str] = Query(None, description="Comma-separated seed track URIs"),
