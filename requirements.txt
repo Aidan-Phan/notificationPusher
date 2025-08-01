@@ -3,3 +3,4 @@ spotipy
 schedule
 python-dotenv
 uvicorn
+fastapi
