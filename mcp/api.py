@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Query
-from tools import thepusherrr, spotify
+from mcp.tools import thepusherrr, spotify
 
 app = FastAPI(title="MCP API", description="Multi-Control Panel API", version="1.0.0")
 

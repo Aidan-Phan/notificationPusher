@@ -1,4 +1,0 @@
-requests
-spotipy
-schedule
-python-dotenv

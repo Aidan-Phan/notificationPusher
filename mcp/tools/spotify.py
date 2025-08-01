@@ -1,6 +1,8 @@
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyOAuth
-from config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECT_URI
+from mcp.config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECT_URI
+# and in thepusherrr.py
+from mcp.config import PUSHOVER_USER_KEY, PUSHOVER_API_TOKEN
 import os
 
 scope = "user-read-playback-state user-modify-playback-state"

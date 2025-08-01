@@ -1,5 +1,5 @@
 import requests
-from config import PUSHOVER_API_TOKEN, PUSHOVER_USER_KEY
+from ..config import PUSHOVER_USER_KEY, PUSHOVER_API_TOKEN
 
 def send_notification(title, message):
     data = {
