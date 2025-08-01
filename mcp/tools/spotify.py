@@ -11,6 +11,9 @@ from ..config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECT_
 # Scope needed for playback control, playlist management, and recommendations
 SCOPE = "user-read-playback-state user-modify-playback-state playlist-read-private playlist-modify-private playlist-modify-public user-read-private"
 
+# Use a consistent cache path so the OAuth callback and client share it
+_CACHE_PATH = os.path.join(os.getcwd(), "mcp_spotify_token_cache")
+
 # Lazy singleton pattern for Spotify client with token caching
 _sp_client: Optional[Spotify] = None
 
@@ -22,7 +25,7 @@ def get_spotify_client() -> Spotify:
             client_secret=SPOTIFY_CLIENT_SECRET,
             redirect_uri=SPOTIFY_REDIRECT_URI,
             scope=SCOPE,
-            cache_path=os.path.expanduser("~/.cache/mcp_spotify_token"),
+            cache_path=_CACHE_PATH,
             show_dialog=False,
         )
         _sp_client = Spotify(auth_manager=auth_manager)
@@ -130,14 +133,15 @@ def play_track(uri: str) -> Dict:
 
 @retry
 def play_song_radio(track_uri: str) -> Dict:
-    # Spotify removed dedicated radio; emulate with recommendations based on the track
     recs = get_recommendations(seed_tracks=[track_uri], limit=20)
-    uris = [t["uri"] for t in recs[:5]]
+    if not recs:
+        return {"status": "no recommendations found for", "seed": track_uri}
+    uris = [t["uri"] for t in recs[:5] if t and t.get("uri")]
     if uris:
         sp = get_spotify_client()
         sp.start_playback(uris=uris)
         return {"status": "playing radio-like from", "seed": track_uri, "played": uris}
-    return {"status": "no recommendations found for", "seed": track_uri}
+    return {"status": "no valid URIs in recommendations", "seed": track_uri}
 
 @retry
 def next_track() -> Dict:
@@ -168,3 +172,7 @@ def set_volume(volume_percent: int) -> Dict:
     sp = get_spotify_client()
     sp.volume(volume_percent)
     return {"status": "volume set", "volume": volume_percent}
+
+# backward compat aliases if any old code expects different names
+play_next_track = next_track
+play_previous_track = previous_track

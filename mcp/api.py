@@ -3,12 +3,47 @@ from typing import Optional
 from mcp.tools import thepusherrr, spotify
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import PlainTextResponse
+from fastapi import Request
+from mcp.tools.spotify import get_spotify_client
+from spotipy.oauth2 import SpotifyOAuth
+import os
 
 app = FastAPI(
     title="MCP (Multi-Control Panel) API",
     description="An interface to control Spotify and send notifications. You can play playlists, tracks, start radios, resume/skip, get current song, and push custom messages.",
     version="1.0.0",
 )
+
+
+
+
+@app.get("/auth/start", summary="Start Spotify OAuth", description="Begin Spotify authorization; returns a URL to visit.")
+def auth_start():
+    auth_manager = SpotifyOAuth(
+        client_id=SPOTIFY_CLIENT_ID,
+        client_secret=SPOTIFY_CLIENT_SECRET,
+        redirect_uri=SPOTIFY_REDIRECT_URI,
+        scope="user-read-playback-state user-modify-playback-state playlist-read-private playlist-modify-private playlist-modify-public user-read-private",
+        cache_path=os.path.join(os.getcwd(), "mcp_spotify_token_cache"),
+        show_dialog=True,
+    )
+    auth_url = auth_manager.get_authorize_url()
+    return {"auth_url": auth_url}
+
+
+@app.get("/auth/callback", summary="Spotify OAuth callback", description="Callback endpoint Spotify redirects to after user authorizes.")
+def auth_callback(code: str):
+    auth_manager = SpotifyOAuth(
+        client_id=SPOTIFY_CLIENT_ID,
+        client_secret=SPOTIFY_CLIENT_SECRET,
+        redirect_uri=SPOTIFY_REDIRECT_URI,
+        scope="user-read-playback-state user-modify-playback-state playlist-read-private playlist-modify-private playlist-modify-public user-read-private",
+        cache_path=os.path.join(os.getcwd(), "mcp_spotify_token_cache"),
+        show_dialog=False,
+    )
+    # This will exchange the code and cache tokens for subsequent calls
+    token_info = auth_manager.get_access_token(code, as_dict=True)
+    return {"status": "authenticated", "token_info": token_info}
 
 @app.head("/", include_in_schema=False)
 def head_root():
