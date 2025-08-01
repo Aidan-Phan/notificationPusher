@@ -1,231 +1,194 @@
+import os
 import logging
-from typing import Optional, List, Dict, Any
+from typing import List, Optional
 
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
-from mcp.config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECT_URI
+# Configuration from env; expected to be set in your deployment env vars
+CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
+CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
+REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "")
+SCOPE = ",".join(
+    [
+        "user-read-playback-state",
+        "user-modify-playback-state",
+        "user-read-currently-playing",
+        "playlist-read-private",
+        "playlist-modify-private",
+        "playlist-modify-public",
+        "user-read-email",
+        "user-read-private",
+    ]
+)
+CACHE_PATH = os.getenv("SPOTIFY_CACHE_PATH", ".spotifycache")  # persistent cache file
 
-logger = logging.getLogger(__name__)
-
-SCOPES = [
-    "user-read-playback-state",
-    "user-modify-playback-state",
-    "playlist-modify-private",
-    "playlist-modify-public",
-    "user-read-currently-playing",
-    "user-read-email",
-    "user-read-private",
-]
-
-CACHE_PATH = ".spotify_token_cache"  # persistent file in working dir
-
-if not (SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET and SPOTIFY_REDIRECT_URI):
-    logger.warning("Spotify credentials missing; auth endpoints will fail.")
+_logger = logging.getLogger(__name__)
 
 
-def _make_oauth() -> SpotifyOAuth:
+def _get_oauth():
+    if not CLIENT_ID or not CLIENT_SECRET or not REDIRECT_URI:
+        raise RuntimeError("Spotify credentials (CLIENT_ID/SECRET/REDIRECT_URI) not configured.")
     return SpotifyOAuth(
-        client_id=SPOTIFY_CLIENT_ID,
-        client_secret=SPOTIFY_CLIENT_SECRET,
-        redirect_uri=SPOTIFY_REDIRECT_URI,
-        scope=" ".join(SCOPES),
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        redirect_uri=REDIRECT_URI,
+        scope=SCOPE,
         cache_path=CACHE_PATH,
         show_dialog=False,
     )
 
 
-def _get_spotify_client() -> Optional[spotipy.Spotify]:
-    oauth = _make_oauth()
-    token_info = oauth.get_cached_token()
+def _get_client():
+    auth_manager = _get_oauth()
+    token_info = auth_manager.get_cached_token()
     if not token_info:
-        return None
-    access_token = None
-    try:
-        # Newer spotipy returns a string token when as_dict=False
-        access_token = oauth.get_access_token(as_dict=False)
-    except Exception:
-        # Try refreshing manually
-        try:
-            refresh_token = token_info.get("refresh_token")
-            if not refresh_token:
-                return None
-            token_info = oauth.refresh_access_token(refresh_token)
-            access_token = token_info.get("access_token")
-        except Exception:
-            logger.exception("Failed to refresh Spotify token")
-            return None
-    if not access_token:
-        return None
-    return spotipy.Spotify(auth=access_token)
+        return None  # caller must trigger auth flow
+    sp = spotipy.Spotify(auth_manager=auth_manager)
+    return sp
 
 
 def get_auth_url() -> str:
-    return _make_oauth().get_authorize_url()
+    oauth = _get_oauth()
+    return oauth.get_authorize_url()
 
 
-def handle_callback(code: str) -> Dict[str, Any]:
-    oauth = _make_oauth()
-    # This stores the token in cache_path
-    token_info = oauth.get_access_token(code=code)
+def handle_callback(code: str) -> dict:
+    oauth = _get_oauth()
+    token_info = oauth.get_access_token(code)
     return token_info
 
 
-def _unauthenticated_response():
-    return {"error": "not authenticated", "action": "visit /auth/start to authenticate"}
+def _ensure_client():
+    sp = _get_client()
+    if sp is None:
+        raise RuntimeError("No Spotify token cached. Authenticate via /auth/start and /auth/callback first.")
+    return sp
 
 
-def _with_client(func):
-    def wrapper(*args, **kwargs):
-        sp = _get_spotify_client()
-        if not sp:
-            return _unauthenticated_response()
-        try:
-            return func(sp, *args, **kwargs)
-        except Exception as e:
-            logger.exception("%s failed", func.__name__)
-            return {"error": str(e)}
-    return wrapper
-
-
-@_with_client
-def get_current_song(sp: spotipy.Spotify):
+def get_current_song():
+    sp = _ensure_client()
     playback = sp.current_playback()
     if not playback or not playback.get("item"):
-        return {"song": None, "artist": None, "playing": False}
+        return None, None
     item = playback["item"]
-    name = item.get("name")
+    song = item.get("name")
     artists = [a.get("name") for a in item.get("artists", [])]
-    is_playing = playback.get("is_playing", False)
-    return {"song": name, "artists": artists, "playing": is_playing}
+    artist = ", ".join(artists)
+    return song, artist
 
 
-@_with_client
-def play_playlist(sp: spotipy.Spotify, playlist_uri: str):
-    sp.start_playback(context_uri=playlist_uri)
-    return {"status": "playing playlist", "uri": playlist_uri}
+def play_playlist(playlist_uri: str):
+    sp = _ensure_client()
+    return sp.start_playback(context_uri=playlist_uri)
 
 
-@_with_client
-def play_track(sp: spotipy.Spotify, track_uri: str):
-    sp.start_playback(uris=[track_uri])
-    return {"status": "playing track", "uri": track_uri}
-
-
-@_with_client
-def play_song_radio(sp: spotipy.Spotify, song_uri: str):
-    seed_id = song_uri.split(":")[-1]
-    recs = sp.recommendations(seed_tracks=[seed_id], limit=10)
-    uris = [t.get("uri") for t in recs.get("tracks", []) if t.get("uri")]
+def play_song_radio(seed_track_uri: str):
+    sp = _ensure_client()
+    recs = sp.recommendations(seed_tracks=[seed_track_uri], limit=20)
+    uris = [t["uri"] for t in recs.get("tracks", [])]
     if not uris:
         return {"error": "no recommendations found"}
-    sp.start_playback(uris=uris)
-    return {"status": "started radio", "seed": song_uri, "played": uris[:3]}
+    return sp.start_playback(uris=uris)
 
 
-@_with_client
-def play_next_track(sp: spotipy.Spotify):
-    sp.next_track()
-    return {"status": "skipped"}
+def play_next_track():
+    sp = _ensure_client()
+    return sp.next_track()
 
 
-@_with_client
-def resume_playback(sp: spotipy.Spotify):
-    sp.start_playback()
-    return {"status": "resumed"}
+def play_track(track_uri: str):
+    sp = _ensure_client()
+    return sp.start_playback(uris=[track_uri])
 
 
-@_with_client
-def pause_playback(sp: spotipy.Spotify):
-    sp.pause_playback()
-    return {"status": "paused"}
+def resume_playback():
+    sp = _ensure_client()
+    return sp.start_playback()
 
 
-@_with_client
-def previous_track(sp: spotipy.Spotify):
-    sp.previous_track()
-    return {"status": "previous"}
+def pause_playback():
+    sp = _ensure_client()
+    return sp.pause_playback()
 
 
-@_with_client
-def set_volume(sp: spotipy.Spotify, level: int):
-    sp.volume(level)
-    return {"status": "volume set", "level": level}
+def previous_track():
+    sp = _ensure_client()
+    return sp.previous_track()
 
 
-@_with_client
-def search_tracks(sp: spotipy.Spotify, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+def set_volume(volume_percent: int):
+    sp = _ensure_client()
+    return sp.volume(volume_percent)
+
+
+def search_tracks(query: str, limit: int = 10):
+    sp = _ensure_client()
     result = sp.search(q=query, type="track", limit=limit)
-    items = result.get("tracks", {}).get("items", []) or []
-    return [
-        {"name": t.get("name"), "artists": [a.get("name") for a in t.get("artists", [])], "uri": t.get("uri"), "id": t.get("id")}
-        for t in items
-    ]
+    return result.get("tracks", {}).get("items", [])
 
 
-@_with_client
 def get_recommendations(
-    sp: spotipy.Spotify,
     seed_tracks: Optional[List[str]] = None,
     seed_artists: Optional[List[str]] = None,
     seed_genres: Optional[List[str]] = None,
     limit: int = 10,
-) -> List[Dict[str, Any]]:
-    kwargs: Dict[str, Any] = {"limit": limit}
+):
+    sp = _ensure_client()
+    params = {}
     if seed_tracks:
-        kwargs["seed_tracks"] = [t.split(":")[-1] for t in seed_tracks]
+        params["seed_tracks"] = seed_tracks[:5]
     if seed_artists:
-        kwargs["seed_artists"] = [a.split(":")[-1] for a in seed_artists]
+        params["seed_artists"] = seed_artists[:5]
     if seed_genres:
-        kwargs["seed_genres"] = seed_genres
-    recs = sp.recommendations(**kwargs)
-    tracks = recs.get("tracks", []) or []
-    return [
-        {"name": t.get("name"), "artists": [a.get("name") for a in t.get("artists", [])], "uri": t.get("uri"), "id": t.get("id")}
-        for t in tracks
-    ]
+        params["seed_genres"] = seed_genres[:5]
+    params["limit"] = limit
+    recs = sp.recommendations(**params)
+    return recs.get("tracks", [])
 
 
-@_with_client
-def create_playlist(sp: spotipy.Spotify, name: str, description: str = "", public: bool = False):
+def create_playlist(name: str, description: str = "", public: bool = False):
+    sp = _ensure_client()
     user = sp.current_user()
-    playlist = sp.user_playlist_create(
-        user=user["id"], name=name, public=public, description=description
-    )
-    return {"id": playlist.get("id"), "name": playlist.get("name"), "url": playlist.get("external_urls", {}).get("spotify")}
+    user_id = user.get("id")
+    if not user_id:
+        return None
+    return sp.user_playlist_create(user_id, name, public=public, description=description)
 
 
-@_with_client
-def add_tracks_to_playlist(sp: spotipy.Spotify, playlist_id: str, uris: List[str]):
-    sp.playlist_add_items(playlist_id, uris)
-    return {"status": "added", "playlist_id": playlist_id, "uris": uris}
+def add_tracks_to_playlist(playlist_id: str, track_uris: List[str]):
+    sp = _ensure_client()
+    return sp.playlist_add_items(playlist_id, track_uris)
 
 
-@_with_client
-def get_user_playlists(sp: spotipy.Spotify, limit: int = 20) -> List[Dict[str, Any]]:
-    playlists = sp.current_user_playlists(limit=limit)
-    items = playlists.get("items", []) or []
-    return [
-        {"name": p.get("name"), "id": p.get("id"), "uri": p.get("uri"), "tracks": p.get("tracks", {}).get("total")}
-        for p in items
-    ]
-
-
-@_with_client
-def get_playlist_tracks(sp: spotipy.Spotify, playlist_id: str) -> List[Dict[str, Any]]:
-    results = sp.playlist_tracks(playlist_id)
-    return [
-        {
-            "name": item.get("track", {}).get("name"),
-            "artists": [a.get("name") for a in (item.get("track", {}).get("artists") or [])],
-            "uri": item.get("track", {}).get("uri"),
-            "id": item.get("track", {}).get("id"),
-        }
-        for item in results.get("items", [])
-        if item.get("track")
-    ]
-
-
-@_with_client
-def get_user_profile(sp: spotipy.Spotify):
+def get_user_profile():
+    sp = _ensure_client()
     return sp.current_user()
+
+
+def get_user_playlists(limit: int = 20):
+    sp = _ensure_client()
+    pls = sp.current_user_playlists(limit=limit)
+    items = pls.get("items", [])
+    return [{"name": p.get("name"), "id": p.get("id"), "uri": p.get("uri")} for p in items]
+
+
+def get_playlist_tracks(playlist_id: str):
+    sp = _ensure_client()
+    all_tracks = []
+    results = sp.playlist_items(playlist_id)
+    all_tracks.extend(results.get("items", []))
+    while results.get("next"):
+        results = sp.next(results)
+        all_tracks.extend(results.get("items", []))
+    simplified = []
+    for entry in all_tracks:
+        t = entry.get("track") or {}
+        simplified.append(
+            {
+                "name": t.get("name"),
+                "artists": [a.get("name") for a in t.get("artists", [])],
+                "uri": t.get("uri"),
+            }
+        )
+    return simplified
