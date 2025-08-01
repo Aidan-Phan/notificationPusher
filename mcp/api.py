@@ -1,12 +1,18 @@
 from fastapi import FastAPI, Query
+from typing import Optional
 from mcp.tools import thepusherrr, spotify
 from fastapi.openapi.utils import get_openapi
+from fastapi.responses import PlainTextResponse
 
 app = FastAPI(
     title="MCP (Multi-Control Panel) API",
     description="An interface to control Spotify and send notifications. You can play playlists, tracks, start radios, resume/skip, get current song, and push custom messages.",
     version="1.0.0",
 )
+
+@app.head("/", include_in_schema=False)
+def head_root():
+    return PlainTextResponse("", status_code=200)
 
 @app.get("/", summary="Root")
 def root():
@@ -44,6 +50,65 @@ def play_track(track: str = Query(..., description="Spotify track URI (e.g., spo
 @app.get("/resume", summary="Resume Spotify playback", description="Resume Spotify playback if paused.")
 def resume():
     return spotify.resume_playback()
+
+
+# === New endpoints for advanced Spotify control ===
+@app.get("/search", summary="Search Tracks", description="Search Spotify for tracks matching a query.")
+def search(query: str = Query(..., description="Search query string (e.g., 'lofi beats')")):
+    tracks = spotify.search_tracks(query)
+    # return minimal info for LLM consumption
+    return {"tracks": [{"name": t.get('name'), "artists": [a.get('name') for a in t.get('artists', [])], "uri": t.get('uri')} for t in tracks]}
+
+@app.get("/recommend", summary="Get Recommendations", description="Get recommended tracks based on seed tracks, artists, or genres. Provide comma-separated lists.")
+def recommend(seed_tracks: Optional[str] = Query(None, description="Comma-separated seed track URIs"),
+              seed_artists: Optional[str] = Query(None, description="Comma-separated seed artist URIs"),
+              seed_genres: Optional[str] = Query(None, description="Comma-separated seed genres"),
+              limit: int = Query(10, description="Number of recommendations to return")):
+    tracks = spotify.get_recommendations(
+        seed_tracks=seed_tracks.split(",") if seed_tracks else None,
+        seed_artists=seed_artists.split(",") if seed_artists else None,
+        seed_genres=seed_genres.split(",") if seed_genres else None,
+        limit=limit,
+    )
+    return {"recommendations": [{"name": t.get('name'), "artists": [a.get('name') for a in t.get('artists', [])], "uri": t.get('uri')} for t in tracks]}
+
+@app.get("/create_playlist", summary="Create Playlist", description="Create a new Spotify playlist.")
+def create_playlist(name: str = Query(..., description="Playlist name"),
+                    description: str = Query("", description="Playlist description"),
+                    public: bool = Query(False, description="Whether the playlist is public")):
+    playlist = spotify.create_playlist(name, description=description, public=public)
+    return playlist or {"error": "failed to create playlist"}
+
+@app.get("/add_to_playlist", summary="Add Tracks to Playlist", description="Add track URIs to an existing playlist. Provide comma-separated track URIs.")
+def add_to_playlist(playlist_id: str = Query(..., description="Target playlist ID"),
+                    track_uris: str = Query(..., description="Comma-separated Spotify track URIs")):
+    uris = [u.strip() for u in track_uris.split(",") if u.strip()]
+    result = spotify.add_tracks_to_playlist(playlist_id, uris)
+    return result or {"error": "failed to add tracks"}
+
+@app.get("/pause", summary="Pause Playback", description="Pause current Spotify playback.")
+def pause():
+    return spotify.pause_playback()
+
+@app.get("/previous", summary="Previous Track", description="Go to previous track.")
+def previous():
+    return spotify.previous_track()
+
+@app.get("/volume", summary="Set Volume", description="Set Spotify playback volume (0-100).")
+def volume(level: int = Query(..., ge=0, le=100, description="Volume percent")):
+    return spotify.set_volume(level)
+
+@app.get("/me", summary="Get User Profile", description="Retrieve the current Spotify user profile.")
+def me():
+    return spotify.get_user_profile()
+
+@app.get("/playlists", summary="List User Playlists", description="Retrieve the current user's playlists.")
+def playlists(limit: int = Query(20, description="Max number of playlists to fetch")):
+    return {"playlists": spotify.get_user_playlists(limit=limit)}
+
+@app.get("/playlist_tracks", summary="Get Playlist Tracks", description="Retrieve all tracks in a playlist.")
+def playlist_tracks(playlist_id: str = Query(..., description="Spotify playlist ID")):
+    return {"tracks": spotify.get_playlist_tracks(playlist_id)}
 
 # === OpenAPI customization ===
 def custom_openapi():
