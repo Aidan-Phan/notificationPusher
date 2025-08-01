@@ -10,7 +10,6 @@ from mcp.config import (
     SPOTIFY_CLIENT_ID,
     SPOTIFY_CLIENT_SECRET,
     SPOTIFY_REDIRECT_URI,
-    validate as validate_spotify_config,
     AIDAN_API_KEY,
 )
 from mcp.utils import identify_user, log_action, get_user_state, add_to_queue, set_last_played, set_online
