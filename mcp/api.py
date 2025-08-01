@@ -13,7 +13,14 @@ from mcp.config import (
     validate_spotify,
     validate_pushover,
 )
-# validate Spotify config on startup so /auth/start fails with a clear error if something is missing
+
+app = FastAPI(
+    title="MCP (Multi-Control Panel) API",
+    description="An interface to control Spotify and send notifications. You can play playlists, tracks, start radios, resume/skip, get current song, and push custom messages.",
+    version="1.0.0",
+)
+
+# Validate config at startup so errors surface early
 try:
     validate_spotify()
 except Exception as e:
@@ -24,71 +31,8 @@ try:
     validate_pushover()
 except Exception as e:
     print("Pushover config validation error:", e)
-    # depending on tolerance you can continue or raise; raising will make /notify fail fast
+    # Not raising here so notifications can be optional; adjust if you want fail-fast
     # raise
-
-try:
-    validate_spotify_config()
-except Exception as e:
-    print("Spotify config validation error:", e)
-    raise
-
-app = FastAPI(
-    title="MCP (Multi-Control Panel) API",
-    description="An interface to control Spotify and send notifications. You can play playlists, tracks, start radios, resume/skip, get current song, and push custom messages.",
-    version="1.0.0",
-)
-
-
-
-
-
-@app.get("/auth/start", summary="Start Spotify OAuth", description="Begin Spotify authorization; returns a URL to visit.")
-def auth_start():
-    auth_manager = SpotifyOAuth(
-        client_id=SPOTIFY_CLIENT_ID,
-        client_secret=SPOTIFY_CLIENT_SECRET,
-        redirect_uri=SPOTIFY_REDIRECT_URI,
-        scope="user-read-playback-state user-modify-playback-state playlist-read-private playlist-modify-private playlist-modify-public user-read-private",
-        cache_path=os.path.join(os.getcwd(), "mcp_spotify_token_cache"),
-        show_dialog=True,
-    )
-    # Fail fast if config missing to give clearer error
-    try:
-        validate_spotify_config()
-    except Exception as e:
-        # This will show up in logs if config is incomplete
-        print("Spotify config validation error:", e)
-    auth_url = auth_manager.get_authorize_url()
-    return {"auth_url": auth_url}
-
-@app.get("/auth/callback", summary="Spotify OAuth callback", description="Callback endpoint Spotify redirects to after user authorizes.")
-def auth_callback(code: str):
-    auth_manager = SpotifyOAuth(
-        client_id=SPOTIFY_CLIENT_ID,
-        client_secret=SPOTIFY_CLIENT_SECRET,
-        redirect_uri=SPOTIFY_REDIRECT_URI,
-        scope="user-read-playback-state user-modify-playback-state playlist-read-private playlist-modify-private playlist-modify-public user-read-private",
-        cache_path=os.path.join(os.getcwd(), "mcp_spotify_token_cache"),
-        show_dialog=False,
-    )
-    token_info = auth_manager.get_access_token(code, as_dict=True)
-    return {"status": "authenticated", "token_info": token_info}
-
-
-@app.get("/auth/callback", summary="Spotify OAuth callback", description="Callback endpoint Spotify redirects to after user authorizes.")
-def auth_callback(code: str):
-    auth_manager = SpotifyOAuth(
-        client_id=SPOTIFY_CLIENT_ID,
-        client_secret=SPOTIFY_CLIENT_SECRET,
-        redirect_uri=SPOTIFY_REDIRECT_URI,
-        scope="user-read-playback-state user-modify-playback-state playlist-read-private playlist-modify-private playlist-modify-public user-read-private",
-        cache_path=os.path.join(os.getcwd(), "mcp_spotify_token_cache"),
-        show_dialog=False,
-    )
-    # This will exchange the code and cache tokens for subsequent calls
-    token_info = auth_manager.get_access_token(code, as_dict=True)
-    return {"status": "authenticated", "token_info": token_info}
 
 @app.head("/", include_in_schema=False)
 def head_root():
@@ -104,6 +48,36 @@ def notify(msg: str = Query("hello world", description="Message to send via Push
     result = thepusherrr.send_notification("MCP Notification", msg)
     return {"message_sent": msg, "result": result}
 
+
+# === OAuth helpers ===
+@app.get("/auth/start", summary="Start Spotify OAuth", description="Begin Spotify authorization; returns a URL to visit.")
+def auth_start():
+    auth_manager = SpotifyOAuth(
+        client_id=SPOTIFY_CLIENT_ID,
+        client_secret=SPOTIFY_CLIENT_SECRET,
+        redirect_uri=SPOTIFY_REDIRECT_URI,
+        scope="user-read-playback-state user-modify-playback-state playlist-read-private playlist-modify-private playlist-modify-public user-read-private",
+        cache_path=os.path.join(os.getcwd(), "mcp_spotify_token_cache"),
+        show_dialog=True,
+    )
+    auth_url = auth_manager.get_authorize_url()
+    return {"auth_url": auth_url}
+
+@app.get("/auth/callback", summary="Spotify OAuth callback", description="Callback after user authorizes Spotify.")
+def auth_callback(code: str):
+    auth_manager = SpotifyOAuth(
+        client_id=SPOTIFY_CLIENT_ID,
+        client_secret=SPOTIFY_CLIENT_SECRET,
+        redirect_uri=SPOTIFY_REDIRECT_URI,
+        scope="user-read-playback-state user-modify-playback-state playlist-read-private playlist-modify-private playlist-modify-public user-read-private",
+        cache_path=os.path.join(os.getcwd(), "mcp_spotify_token_cache"),
+        show_dialog=False,
+    )
+    token_info = auth_manager.get_access_token(code, as_dict=True)
+    return {"status": "authenticated", "token_info": token_info}
+
+
+# === Spotify control endpoints ===
 @app.get("/song", summary="Get Current Song", description="Retrieve the currently playing Spotify song.")
 def current_song():
     song, artist = spotify.get_current_song()
@@ -131,48 +105,6 @@ def play_track(track: str = Query(..., description="Spotify track URI (e.g., spo
 def resume():
     return spotify.resume_playback()
 
-
-# === New endpoints for advanced Spotify control ===
-def search(query: str = Query(..., description="Search query string (e.g., 'lofi beats')")):
-    tracks = spotify.search_tracks(query) or []
-    return {
-        "tracks": [
-            {
-                "name": t.get("name"),
-                "artists": [a.get("name") for a in t.get("artists", [])],
-                "uri": t.get("uri"),
-            }
-            for t in tracks
-        ]
-    }
-
-@app.get("/recommend", summary="Get Recommendations", description="Get recommended tracks based on seed tracks, artists, or genres. Provide comma-separated lists.")
-def recommend(seed_tracks: Optional[str] = Query(None, description="Comma-separated seed track URIs"),
-              seed_artists: Optional[str] = Query(None, description="Comma-separated seed artist URIs"),
-              seed_genres: Optional[str] = Query(None, description="Comma-separated seed genres"),
-              limit: int = Query(10, description="Number of recommendations to return")):
-    tracks = spotify.get_recommendations(
-        seed_tracks=seed_tracks.split(",") if seed_tracks else None,
-        seed_artists=seed_artists.split(",") if seed_artists else None,
-        seed_genres=seed_genres.split(",") if seed_genres else None,
-        limit=limit,
-    )
-    return {"recommendations": [{"name": t.get('name'), "artists": [a.get('name') for a in t.get('artists', [])], "uri": t.get('uri')} for t in tracks]}
-
-@app.get("/create_playlist", summary="Create Playlist", description="Create a new Spotify playlist.")
-def create_playlist(name: str = Query(..., description="Playlist name"),
-                    description: str = Query("", description="Playlist description"),
-                    public: bool = Query(False, description="Whether the playlist is public")):
-    playlist = spotify.create_playlist(name, description=description, public=public)
-    return playlist or {"error": "failed to create playlist"}
-
-@app.get("/add_to_playlist", summary="Add Tracks to Playlist", description="Add track URIs to an existing playlist. Provide comma-separated track URIs.")
-def add_to_playlist(playlist_id: str = Query(..., description="Target playlist ID"),
-                    track_uris: str = Query(..., description="Comma-separated Spotify track URIs")):
-    uris = [u.strip() for u in track_uris.split(",") if u.strip()]
-    result = spotify.add_tracks_to_playlist(playlist_id, uris)
-    return result or {"error": "failed to add tracks"}
-
 @app.get("/pause", summary="Pause Playback", description="Pause current Spotify playback.")
 def pause():
     return spotify.pause_playback()
@@ -197,6 +129,48 @@ def playlists(limit: int = Query(20, description="Max number of playlists to fet
 def playlist_tracks(playlist_id: str = Query(..., description="Spotify playlist ID")):
     return {"tracks": spotify.get_playlist_tracks(playlist_id)}
 
+@app.get("/search", summary="Search Tracks", description="Search Spotify for tracks matching a query.")
+def search(query: str = Query(..., description="Search query string (e.g., 'lofi beats')")):
+    tracks = spotify.search_tracks(query) or []
+    return {
+        "tracks": [
+            {
+                "name": t.get("name"),
+                "artists": [a.get("name") for a in t.get("artists", [])],
+                "uri": t.get("uri"),
+            }
+            for t in tracks
+        ]
+    }
+
+@app.get("/recommend", summary="Get Recommendations", description="Get recommended tracks based on seed tracks, artists, or genres. Provide comma-separated lists.")
+def recommend(seed_tracks: Optional[str] = Query(None, description="Comma-separated seed track URIs"),
+              seed_artists: Optional[str] = Query(None, description="Comma-separated seed artist URIs"),
+              seed_genres: Optional[str] = Query(None, description="Comma-separated seed genres"),
+              limit: int = Query(10, description="Number of recommendations to return")):
+    tracks = spotify.get_recommendations(
+        seed_tracks=seed_tracks.split(",") if seed_tracks else None,
+        seed_artists=seed_artists.split(",") if seed_artists else None,
+        seed_genres=seed_genres.split(",") if seed_genres else None,
+        limit=limit,
+    ) or []
+    return {"recommendations": [{"name": t.get("name"), "artists": [a.get("name") for a in t.get("artists", [])], "uri": t.get("uri")} for t in tracks]}
+
+@app.get("/create_playlist", summary="Create Playlist", description="Create a new Spotify playlist.")
+def create_playlist(name: str = Query(..., description="Playlist name"),
+                    description: str = Query("", description="Playlist description"),
+                    public: bool = Query(False, description="Whether the playlist is public")):
+    playlist = spotify.create_playlist(name, description=description, public=public)
+    return playlist or {"error": "failed to create playlist"}
+
+@app.get("/add_to_playlist", summary="Add Tracks to Playlist", description="Add track URIs to an existing playlist. Provide comma-separated track URIs.")
+def add_to_playlist(playlist_id: str = Query(..., description="Target playlist ID"),
+                    track_uris: str = Query(..., description="Comma-separated Spotify track URIs")):
+    uris = [u.strip() for u in track_uris.split(",") if u.strip()]
+    result = spotify.add_tracks_to_playlist(playlist_id, uris)
+    return result or {"error": "failed to add tracks"}
+
+
 # === OpenAPI customization ===
 def custom_openapi():
     if app.openapi_schema:
@@ -216,7 +190,7 @@ You can:
         routes=app.routes,
     )
     openapi_schema["servers"] = [
-        {"url": "https://notificationspotifymcp.onrender.com"}  # <- replace with your actual Render URL
+        {"url": "https://notificationspotifymcp.onrender.com"}
     ]
     app.openapi_schema = openapi_schema
     return app.openapi_schema
