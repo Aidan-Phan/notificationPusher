@@ -41,7 +41,7 @@ def play_song_radio(song: str = Query(..., description="Spotify song URI (e.g., 
 
 @app.get("/next", summary="Skip to next track", description="Advance playback to the next track in the current queue.")
 def next_track():
-    return spotify.play_next_track()
+    return spotify.next_track()
 
 @app.get("/play_track", summary="Play a specific track", description="Start playback of a specific Spotify track URI.")
 def play_track(track: str = Query(..., description="Spotify track URI (e.g., spotify:track:3n3Ppam7vgaVa1iaRUc9Lp)")):
