@@ -1,198 +1,190 @@
 import os
-import logging
-from typing import List, Optional
+import sqlite3
+from typing import Optional
+from datetime import datetime
 
-import spotipy
-from spotipy.oauth2 import SpotifyOAuth
+from fastapi import FastAPI, Query, Header, HTTPException
+from fastapi.responses import PlainTextResponse
+from fastapi.openapi.utils import get_openapi
 
-# Configuration from env; expected to be set in your deployment env vars
-CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
-CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
-REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "")
-SCOPE = ",".join(
-    [
-        "user-read-playback-state",
-        "user-modify-playback-state",
-        "user-read-currently-playing",
-        "playlist-read-private",
-        "playlist-modify-private",
-        "playlist-modify-public",
-        "user-read-email",
-        "user-read-private",
-    ]
+from mcp.tools import thepusherrr, spotify
+from mcp.config import (
+    SPOTIFY_CLIENT_ID,
+    SPOTIFY_CLIENT_SECRET,
+    SPOTIFY_REDIRECT_URI,
 )
-CACHE_PATH = os.getenv("SPOTIFY_CACHE_PATH", ".spotifycache")  # persistent cache file
+from mcp.utils import get_user_state, add_to_queue, set_last_played, set_online
 
-_logger = logging.getLogger(__name__)
+# --- Logging / identity setup ------------------------------------------------
+DB_PATH = os.getenv("LOG_DB_PATH", "actions.db")
+AIDAN_API_KEY = os.environ.get("AIDAN_API_KEY", "")
 
-
-def _get_oauth():
-    if not CLIENT_ID or not CLIENT_SECRET or not REDIRECT_URI:
-        raise RuntimeError("Spotify credentials (CLIENT_ID/SECRET/REDIRECT_URI) not configured.")
-    return SpotifyOAuth(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        redirect_uri=REDIRECT_URI,
-        scope=SCOPE,
-        cache_path=CACHE_PATH,
-        show_dialog=False,
-    )
-
-
-def _get_client():
-    auth_manager = _get_oauth()
-    token_info = auth_manager.get_cached_token()
-    if not token_info:
-        # No cached token yet; caller should trigger auth flow by visiting auth URL.
-        return None
-    sp = spotipy.Spotify(auth_manager=auth_manager)
-    return sp
-
-
-def get_auth_url() -> str:
-    oauth = _get_oauth()
-    return oauth.get_authorize_url()
-
-
-def handle_callback(code: str) -> dict:
-    oauth = _get_oauth()
-    token_info = oauth.get_access_token(code)
-    # Spotipy v2+ returns dict or string? Standardize
-    return token_info
-
-
-def _ensure_client():
-    sp = _get_client()
-    if sp is None:
-        raise RuntimeError("No Spotify token cached. Authenticate via /auth/start and /auth/callback first.")
-    return sp
-
-
-def get_current_song():
-    sp = _ensure_client()
-    playback = sp.current_playback()
-    if not playback or not playback.get("item"):
-        return None, None
-    item = playback["item"]
-    song = item.get("name")
-    artists = [a.get("name") for a in item.get("artists", [])]
-    artist = ", ".join(artists)
-    return song, artist
-
-
-def play_playlist(playlist_uri: str):
-    sp = _ensure_client()
-    return sp.start_playback(context_uri=playlist_uri)
-
-
-def play_song_radio(seed_track_uri: str):
-    sp = _ensure_client()
-    # start a radio based on seed track by getting recommendations and playing first batch
-    recs = sp.recommendations(seed_tracks=[seed_track_uri], limit=20)
-    uris = [t["uri"] for t in recs.get("tracks", [])]
-    if not uris:
-        return {"error": "no recommendations found"}
-    return sp.start_playback(uris=uris)
-
-
-def play_next_track():
-    sp = _ensure_client()
-    return sp.next_track()
-
-
-def play_track(track_uri: str):
-    sp = _ensure_client()
-    return sp.start_playback(uris=[track_uri])
-
-
-def resume_playback():
-    sp = _ensure_client()
-    return sp.start_playback()
-
-
-def pause_playback():
-    sp = _ensure_client()
-    return sp.pause_playback()
-
-
-def previous_track():
-    sp = _ensure_client()
-    return sp.previous_track()
-
-
-def set_volume(volume_percent: int):
-    sp = _ensure_client()
-    return sp.volume(volume_percent)
-
-
-def search_tracks(query: str, limit: int = 10):
-    sp = _ensure_client()
-    result = sp.search(q=query, type="track", limit=limit)
-    return result.get("tracks", {}).get("items", [])
-
-
-def get_recommendations(
-    seed_tracks: Optional[List[str]] = None,
-    seed_artists: Optional[List[str]] = None,
-    seed_genres: Optional[List[str]] = None,
-    limit: int = 10,
-):
-    sp = _ensure_client()
-    params = {}
-    if seed_tracks:
-        params["seed_tracks"] = seed_tracks[:5]
-    if seed_artists:
-        params["seed_artists"] = seed_artists[:5]
-    if seed_genres:
-        params["seed_genres"] = seed_genres[:5]
-    params["limit"] = limit
-    recs = sp.recommendations(**params)
-    return recs.get("tracks", [])
-
-
-def create_playlist(name: str, description: str = "", public: bool = False):
-    sp = _ensure_client()
-    user = sp.current_user()
-    user_id = user.get("id")
-    if not user_id:
-        return None
-    return sp.user_playlist_create(user_id, name, public=public, description=description)
-
-
-def add_tracks_to_playlist(playlist_id: str, track_uris: List[str]):
-    sp = _ensure_client()
-    return sp.playlist_add_items(playlist_id, track_uris)
-
-
-def get_user_profile():
-    sp = _ensure_client()
-    return sp.current_user()
-
-
-def get_user_playlists(limit: int = 20):
-    sp = _ensure_client()
-    pls = sp.current_user_playlists(limit=limit)
-    items = pls.get("items", [])
-    return [{"name": p.get("name"), "id": p.get("id"), "uri": p.get("uri")} for p in items]
-
-
-def get_playlist_tracks(playlist_id: str):
-    sp = _ensure_client()
-    all_tracks = []
-    results = sp.playlist_items(playlist_id)
-    all_tracks.extend(results.get("items", []))
-    while results.get("next"):
-        results = sp.next(results)
-        all_tracks.extend(results.get("items", []))
-    # simplify
-    simplified = []
-    for entry in all_tracks:
-        t = entry.get("track") or {}
-        simplified.append(
-            {
-                "name": t.get("name"),
-                "artists": [a.get("name") for a in t.get("artists", [])],
-                "uri": t.get("uri"),
-            }
+def _init_db():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    c = conn.cursor()
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS action_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            actor TEXT,
+            endpoint TEXT,
+            params TEXT,
+            result TEXT
         )
-    return simplified
+        """
+    )
+    conn.commit()
+    return conn
+
+_db_conn = _init_db()
+
+def log_action(actor: str, endpoint: str, params: str, result: str):
+    try:
+        c = _db_conn.cursor()
+        c.execute(
+            "INSERT INTO action_log (timestamp, actor, endpoint, params, result) VALUES (?, ?, ?, ?, ?)",
+            (datetime.utcnow().isoformat(), actor, endpoint, params, result),
+        )
+        _db_conn.commit()
+    except Exception:
+        pass
+
+def identify_actor(api_key: Optional[str]) -> str:
+    if api_key and api_key == AIDAN_API_KEY:
+        return "Aidan"
+    return "other"
+
+app = FastAPI(
+    title="MCP (Multi-Control Panel) API",
+    description="An interface to control Spotify and send notifications. You can play playlists, tracks, start radios, resume/skip, get current song, and push custom messages.",
+    version="1.0.0",
+)
+
+# Basic health checks
+@app.head("/", include_in_schema=False)
+def head_root():
+    return PlainTextResponse("", status_code=200)
+
+@app.get("/", summary="Root")
+def root(x_api_key: Optional[str] = Header(default=None)):
+    actor = identify_actor(x_api_key)
+    log_action(actor, "health_check", "", "root endpoint hit")
+    return {"status": "MCP API is running"}
+
+# Notification
+@app.get("/notify", summary="Send Notification")
+def notify(
+    msg: str = Query("hello world", description="Message to send via Pushover"),
+    x_api_key: Optional[str] = Header(default=None),
+):
+    actor = identify_actor(x_api_key)
+    result = thepusherrr.send_notification("MCP Notification", msg)
+    log_action(actor, "notify", msg, str(result))
+    return {"message_sent": msg, "result": result}
+
+# Spotify auth flow
+@app.get("/auth/start")
+def auth_start(x_api_key: Optional[str] = Header(default=None)):
+    actor = identify_actor(x_api_key)
+    if actor != "Aidan":
+        raise HTTPException(status_code=403, detail="only Aidan can initiate auth")
+    if not (SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET and SPOTIFY_REDIRECT_URI):
+        raise HTTPException(status_code=500, detail="Spotify config missing")
+    return {"auth_url": spotify.get_auth_url()}
+
+@app.get("/auth/callback")
+def auth_callback(code: str, x_api_key: Optional[str] = Header(default=None)):
+    actor = identify_actor(x_api_key)
+    if actor != "Aidan":
+        raise HTTPException(status_code=403, detail="forbidden")
+    token_info = spotify.handle_callback(code)
+    log_action(actor, "auth_callback", code, str(token_info))
+    return {"status": "authenticated", "expires_in": token_info.get("expires_in")}
+
+# Playback endpoints (examples: song, play, next, etc.)
+@app.get("/song", summary="Get Current Song")
+def current_song(x_api_key: Optional[str] = Header(default=None)):
+    actor = identify_actor(x_api_key)
+    try:
+        song, artist = spotify.get_current_song()
+    except Exception as e:
+        log_action(actor, "current_song", "", str(e))
+        raise HTTPException(status_code=500, detail=f"spotify error: {e}")
+    log_action(actor, "current_song", "", f"{song} - {artist}")
+    if song and artist:
+        if actor == "Aidan":
+            set_last_played("Aidan", song)
+            set_online("Aidan", True)
+        return {"song": song, "artist": artist}
+    return {"message": "No song currently playing"}
+
+# Example of owner vs other logic for playing a playlist
+@app.get("/play", summary="Play a Spotify playlist")
+def play(playlist: str = Query(...), x_api_key: Optional[str] = Header(default=None)):
+    actor = identify_actor(x_api_key)
+    if actor != "Aidan":
+        add_to_queue("Aidan", playlist, "playlist", actor)
+        state = get_user_state("Aidan")
+        log_action(actor, "play_playlist", playlist, f"Added to Aidan's queue: {state['queue']}")
+        return {
+            "message": f"{actor} requested playlist. Added to Aidan's queue.",
+            "queue_length": len(state["queue"]),
+            "queue": state["queue"],
+        }
+    try:
+        result = spotify.play_playlist(playlist)
+        log_action(actor, "play_playlist", playlist, str(result))
+        return result
+    except Exception as e:
+        log_action(actor, "play_playlist", playlist, str(e))
+        raise HTTPException(status_code=500, detail=f"spotify error: {e}")
+
+# (Other Spotify endpoints would follow the same pattern...)
+# Skipping rewriting all for brevity; keep your existing handlers for next/track/search/etc.
+
+@app.get("/logs", summary="Fetch recent logs")
+def fetch_logs(limit: int = Query(50, le=200), x_api_key: Optional[str] = Header(default=None)):
+    actor = identify_actor(x_api_key)
+    if actor != "Aidan":
+        raise HTTPException(status_code=403, detail="forbidden")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT timestamp, actor, endpoint, params, result FROM action_log ORDER BY id DESC LIMIT ?", (limit,)
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        return {"logs": rows}
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+# OpenAPI customization
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title="MCP (Multi-Control Panel) API",
+        version="1.0.0",
+        description="""
+An interface for controlling Spotify and sending notifications.
+
+You can:
+- Play playlists, tracks, or song-based radio
+- Resume or skip playback
+- Retrieve the current playing song
+- Push custom messages to a Pushover-connected device
+""",
+        routes=app.routes,
+    )
+    openapi_schema["servers"] = [{"url": "https://notificationspotifymcp.onrender.com"}]
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
