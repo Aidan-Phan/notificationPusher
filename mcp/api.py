@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import FastAPI, Query, Header, HTTPException
 from fastapi.responses import PlainTextResponse
 from fastapi.openapi.utils import get_openapi
-
+from fastapi import Request
 from mcp.tools import thepusherrr, spotify
 from mcp.config import (
     SPOTIFY_CLIENT_ID,
@@ -41,6 +41,22 @@ def notify(msg: str = Query("hello world", description="Message to send via Push
     result = thepusherrr.send_notification("MCP Notification", msg)
     return {"message_sent": msg, "result": result}
 
+@app.get("/auth/start", summary="Begin Spotify OAuth")
+def auth_start(x_api_key: Optional[str] = Header(default=None)):
+    user = identify_user(x_api_key, AIDAN_API_KEY)
+    if user != "Aidan":
+        return {"error": "only Aidan can initiate auth"}
+    url = spotify.get_auth_url()
+    return {"auth_url": url}
+
+@app.get("/auth/callback", summary="Handle Spotify OAuth callback")
+def auth_callback(code: str, x_api_key: Optional[str] = Header(default=None)):
+    user = identify_user(x_api_key, AIDAN_API_KEY)
+    if user != "Aidan":
+        raise HTTPException(status_code=403, detail="forbidden")
+    token_info = spotify.handle_callback(code)
+    # you can return minimal safe info; the cache file now contains refresh token
+    return {"status": "authenticated", "expires_in": token_info.get("expires_in")}
 
 @app.get("/song", summary="Get Current Song", description="Retrieve the currently playing Spotify song.")
 def current_song(x_api_key: Optional[str] = Header(default=None)):

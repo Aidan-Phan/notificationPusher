@@ -5,224 +5,250 @@ from typing import Optional
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
-from mcp.config import (
-    SPOTIFY_CLIENT_ID,
-    SPOTIFY_CLIENT_SECRET,
-    SPOTIFY_REDIRECT_URI,
+from . import utils  # adjust if your import path differs
+
+logger = logging.getLogger(__name__)
+
+# Scopes you need; expand if you add more functionality
+SCOPE = ",".join(
+    [
+        "user-read-playback-state",
+        "user-modify-playback-state",
+        "playlist-modify-private",
+        "playlist-modify-public",
+        "user-read-currently-playing",
+    ]
 )
 
-# === internal client retrieval ===
-_TOKEN_CACHE_PATH = os.path.join(os.getcwd(), "mcp_spotify_token_cache")
+# Use environment or fallback
+CACHE_PATH = os.getenv("SPOTIFY_CACHE_PATH", ".cache-spotify")  # file persisted across restarts if directory is writable
+CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
+CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
+REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "")
 
-
-def _get_auth_manager(show_dialog: bool = False) -> SpotifyOAuth:
+def _make_oauth():
     return SpotifyOAuth(
-        client_id=SPOTIFY_CLIENT_ID,
-        client_secret=SPOTIFY_CLIENT_SECRET,
-        redirect_uri=SPOTIFY_REDIRECT_URI,
-        scope=(
-            "user-read-playback-state user-modify-playback-state "
-            "playlist-read-private playlist-modify-private playlist-modify-public user-read-private"
-        ),
-        cache_path=_TOKEN_CACHE_PATH,
-        show_dialog=show_dialog,
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        redirect_uri=REDIRECT_URI,
+        scope=SCOPE,
+        cache_path=CACHE_PATH,
+        show_dialog=False,  # set True if you want forced consent occasionally
     )
 
-
-def _get_spotify_client() -> spotipy.Spotify:
-    auth_manager = _get_auth_manager()
-    token_info = auth_manager.get_cached_token()
+def get_spotify_client() -> Optional[spotipy.Spotify]:
+    oauth = _make_oauth()
+    token_info = oauth.get_cached_token()
     if not token_info:
-        # Force interactive auth if none cached
-        auth_manager = _get_auth_manager(show_dialog=True)
-    return spotipy.Spotify(auth_manager=auth_manager)
-
-
-# === Spotify operations ===
-
-def get_track(track_uri: str) -> dict:
-    try:
-        sp = _get_spotify_client()
-        return sp.track(track_uri)
-    except Exception as e:
-        logging.error("get_track error: %s", e)
-        return {"name": track_uri, "error": str(e)}
-
-
-def search_tracks(query: str, limit: int = 10) -> Optional[list]:
-    try:
-        sp = _get_spotify_client()
-        res = sp.search(q=query, type="track", limit=limit)
-        return res.get("tracks", {}).get("items", [])
-    except Exception as e:
-        logging.error("Error in search_tracks: %s", e)
+        # Not yet authenticated
         return None
-
-
-def get_recommendations(
-    seed_tracks: Optional[list] = None,
-    seed_artists: Optional[list] = None,
-    seed_genres: Optional[list] = None,
-    limit: int = 10,
-) -> list:
+    # Spotipy will auto-refresh if expired when calling get_access_token
     try:
-        sp = _get_spotify_client()
-        return (
-            sp.recommendations(
-                seed_tracks=seed_tracks or [],
-                seed_artists=seed_artists or [],
-                seed_genres=seed_genres or [],
-                limit=limit,
-            )
-            .get("tracks", [])
-        )
+        access_token = oauth.get_access_token(as_dict=False)
     except Exception as e:
-        logging.error("get_recommendations error: %s", e)
-        return []
+        logger.error("Failed getting access token: %s", e)
+        return None
+    return spotipy.Spotify(auth=access_token)
 
+# === OAuth helpers ===
+def get_auth_url():
+    oauth = _make_oauth()
+    return oauth.get_authorize_url()
 
-def play_track(track_uri: str):
-    try:
-        sp = _get_spotify_client()
-        return sp.start_playback(uris=[track_uri])
-    except Exception as e:
-        logging.error("play_track error: %s", e)
-        return {"error": str(e)}
+def handle_callback(code: str):
+    oauth = _make_oauth()
+    token_info = oauth.get_access_token(code=code)
+    # This writes to cache_path automatically
+    return token_info
 
-
-def next_track():
-    try:
-        sp = _get_spotify_client()
-        return sp.next_track()
-    except Exception as e:
-        logging.error("next_track error: %s", e)
-        return {"error": str(e)}
-
-
-def previous_track():
-    try:
-        sp = _get_spotify_client()
-        return sp.previous_track()
-    except Exception as e:
-        logging.error("previous_track error: %s", e)
-        return {"error": str(e)}
-
-
-def pause_playback():
-    try:
-        sp = _get_spotify_client()
-        return sp.pause_playback()
-    except Exception as e:
-        logging.error("pause_playback error: %s", e)
-        return {"error": str(e)}
-
-
-def resume_playback():
-    try:
-        sp = _get_spotify_client()
-        return sp.start_playback()
-    except Exception as e:
-        logging.error("resume_playback error: %s", e)
-        return {"error": str(e)}
-
+# === Wrapped actions ===
+def get_current_song():
+    sp = get_spotify_client()
+    if not sp:
+        return None, None
+    playback = sp.current_playback()
+    if not playback or not playback.get("item"):
+        return None, None
+    item = playback["item"]
+    name = item.get("name")
+    artists = ", ".join([a.get("name") for a in item.get("artists", [])])
+    return name, artists
 
 def play_playlist(playlist_uri: str):
+    sp = get_spotify_client()
+    if not sp:
+        return {"error": "not authenticated"}
     try:
-        sp = _get_spotify_client()
-        return sp.start_playback(context_uri=playlist_uri)
+        sp.start_playback(context_uri=playlist_uri)
+        return {"status": "playing playlist", "uri": playlist_uri}
     except Exception as e:
-        logging.error("play_playlist error: %s", e)
+        logger.exception("play_playlist failed")
         return {"error": str(e)}
 
-
-def play_song_radio(track_uri: str):
+def play_track(track_uri: str):
+    sp = get_spotify_client()
+    if not sp:
+        return {"error": "not authenticated"}
     try:
-        sp = _get_spotify_client()
-        # Spotify's recommendation radio can be approximated via seed track recommendations
-        recs = sp.recommendations(seed_tracks=[track_uri], limit=20)
+        sp.start_playback(uris=[track_uri])
+        return {"status": "playing track", "uri": track_uri}
+    except Exception as e:
+        logger.exception("play_track failed")
+        return {"error": str(e)}
+
+def play_song_radio(song_uri: str):
+    sp = get_spotify_client()
+    if not sp:
+        return {"error": "not authenticated"}
+    try:
+        # Spotify doesn’t have an explicit “radio” endpoint; seed a recommendation and play
+        recs = sp.recommendations(seed_tracks=[song_uri.split(":")[-1]], limit=10)
         uris = [t["uri"] for t in recs.get("tracks", [])]
-        if uris:
-            return sp.start_playback(uris=uris)
-        return {"message": "no radio recommendations available"}
+        if not uris:
+            return {"error": "no recommendations found"}
+        sp.start_playback(uris=uris)
+        return {"status": "started song radio", "seed": song_uri, "played": uris[:3]}
     except Exception as e:
-        logging.error("play_song_radio error: %s", e)
+        logger.exception("play_song_radio failed")
         return {"error": str(e)}
 
-
-def create_playlist(name: str, description: str = "", public: bool = False):
+def play_next_track():
+    sp = get_spotify_client()
+    if not sp:
+        return {"error": "not authenticated"}
     try:
-        sp = _get_spotify_client()
-        user = sp.current_user()
-        return sp.user_playlist_create(
-            user=user.get("id"), name=name, public=public, description=description
-        )
+        sp.next_track()
+        return {"status": "skipped"}
     except Exception as e:
-        logging.error("create_playlist error: %s", e)
-        return None
+        logger.exception("play_next_track failed")
+        return {"error": str(e)}
 
-
-def add_tracks_to_playlist(playlist_id: str, track_uris: list):
+def resume_playback():
+    sp = get_spotify_client()
+    if not sp:
+        return {"error": "not authenticated"}
     try:
-        sp = _get_spotify_client()
-        return sp.playlist_add_items(playlist_id, track_uris)
+        sp.start_playback()
+        return {"status": "resumed"}
     except Exception as e:
-        logging.error("add_tracks_to_playlist error: %s", e)
-        return None
+        logger.exception("resume_playback failed")
+        return {"error": str(e)}
 
-
-def get_user_playlists(limit: int = 20):
+def pause_playback():
+    sp = get_spotify_client()
+    if not sp:
+        return {"error": "not authenticated"}
     try:
-        sp = _get_spotify_client()
-        res = sp.current_user_playlists(limit=limit)
-        return res.get("items", [])
+        sp.pause_playback()
+        return {"status": "paused"}
     except Exception as e:
-        logging.error("get_user_playlists error: %s", e)
-        return []
+        logger.exception("pause_playback failed")
+        return {"error": str(e)}
 
-
-def get_playlist_tracks(playlist_id: str):
+def previous_track():
+    sp = get_spotify_client()
+    if not sp:
+        return {"error": "not authenticated"}
     try:
-        sp = _get_spotify_client()
-        items = []
-        results = sp.playlist_items(playlist_id)
-        items.extend(results.get("items", []))
-        while results.get("next"):
-            results = sp.next(results)
-            items.extend(results.get("items", []))
-        return items
+        sp.previous_track()
+        return {"status": "previous"}
     except Exception as e:
-        logging.error("get_playlist_tracks error: %s", e)
-        return []
-
-
-def get_current_song():
-    try:
-        sp = _get_spotify_client()
-        playback = sp.current_playback()
-        if not playback or not playback.get("item"):
-            return None, None
-        item = playback["item"]
-        name = item.get("name")
-        artists = ", ".join(a.get("name") for a in item.get("artists", []))
-        return name, artists
-    except Exception as e:
-        logging.error("get_current_song error: %s", e)
-        return None, None
-
+        logger.exception("previous_track failed")
+        return {"error": str(e)}
 
 def set_volume(level: int):
+    sp = get_spotify_client()
+    if not sp:
+        return {"error": "not authenticated"}
     try:
-        sp = _get_spotify_client()
-        return sp.volume(level)
+        sp.volume(level)
+        return {"status": "volume set", "level": level}
     except Exception as e:
-        logging.error("set_volume error: %s", e)
+        logger.exception("set_volume failed")
         return {"error": str(e)}
 
+def search_tracks(query: str):
+    sp = get_spotify_client()
+    if not sp:
+        return None
+    try:
+        result = sp.search(q=query, type="track", limit=10)
+        return result.get("tracks", {}).get("items", [])
+    except Exception as e:
+        logger.exception("search_tracks failed")
+        return None
+
+def get_recommendations(seed_tracks=None, seed_artists=None, seed_genres=None, limit=10):
+    sp = get_spotify_client()
+    if not sp:
+        return []
+    kwargs = {"limit": limit}
+    if seed_tracks:
+        kwargs["seed_tracks"] = [t.split(":")[-1] for t in seed_tracks]
+    if seed_artists:
+        kwargs["seed_artists"] = [a.split(":")[-1] for a in seed_artists]
+    if seed_genres:
+        kwargs["seed_genres"] = seed_genres
+    try:
+        recs = sp.recommendations(**kwargs)
+        return recs.get("tracks", [])
+    except Exception as e:
+        logger.exception("get_recommendations failed")
+        return []
+
+def create_playlist(name: str, description: str = "", public: bool = False):
+    sp = get_spotify_client()
+    if not sp:
+        return {"error": "not authenticated"}
+    try:
+        user = sp.current_user()
+        playlist = sp.user_playlist_create(
+            user=user["id"], name=name, public=public, description=description
+        )
+        return playlist
+    except Exception as e:
+        logger.exception("create_playlist failed")
+        return {"error": str(e)}
+
+def add_tracks_to_playlist(playlist_id: str, uris: list[str]):
+    sp = get_spotify_client()
+    if not sp:
+        return {"error": "not authenticated"}
+    try:
+        sp.playlist_add_items(playlist_id, uris)
+        return {"status": "added", "playlist_id": playlist_id, "uris": uris}
+    except Exception as e:
+        logger.exception("add_tracks_to_playlist failed")
+        return {"error": str(e)}
+
+def get_user_playlists(limit=20):
+    sp = get_spotify_client()
+    if not sp:
+        return []
+    try:
+        playlists = sp.current_user_playlists(limit=limit)
+        return playlists.get("items", [])
+    except Exception as e:
+        logger.exception("get_user_playlists failed")
+        return []
+
+def get_playlist_tracks(playlist_id: str):
+    sp = get_spotify_client()
+    if not sp:
+        return []
+    try:
+        results = sp.playlist_tracks(playlist_id)
+        return [item["track"] for item in results.get("items", [])]
+    except Exception as e:
+        logger.exception("get_playlist_tracks failed")
+        return []
 
 def get_user_profile():
+    sp = get_spotify_client()
+    if not sp:
+        return {}
     try:
-        sp = _get_spotify_client()
         return sp.current_user()
     except Exception as e:
-        logging.error("get_user_profile error: %s", e)
-        return None
+        logger.exception("get_user_profile failed")
+        return {}
