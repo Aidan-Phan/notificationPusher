@@ -2,3 +2,4 @@ requests
 spotipy
 schedule
 python-dotenv
+uvicorn
