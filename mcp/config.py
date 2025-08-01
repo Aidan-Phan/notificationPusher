@@ -12,6 +12,11 @@ SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI")
 PUSHOVER_API_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
 PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
 
+
+# Your identifying API key for Aidan
+AIDAN_API_KEY = os.getenv("AIDAN_API_KEY", "")
+
+
 def validate_spotify():
     missing = []
     if not SPOTIFY_CLIENT_ID:
