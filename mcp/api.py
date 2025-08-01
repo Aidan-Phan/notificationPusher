@@ -8,6 +8,13 @@ from typing import Optional
 from mcp.tools import thepusherrr, spotify
 from mcp.config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECT_URI, validate as validate_spotify_config
 
+# validate Spotify config on startup so /auth/start fails with a clear error if something is missing
+try:
+    validate_spotify_config()
+except Exception as e:
+    print("Spotify config validation error:", e)
+    raise
+
 app = FastAPI(
     title="MCP (Multi-Control Panel) API",
     description="An interface to control Spotify and send notifications. You can play playlists, tracks, start radios, resume/skip, get current song, and push custom messages.",
@@ -108,7 +115,6 @@ def resume():
 
 
 # === New endpoints for advanced Spotify control ===
-@app.get("/search", summary="Search Tracks", description="Search Spotify for tracks matching a query.")
 def search(query: str = Query(..., description="Search query string (e.g., 'lofi beats')")):
     tracks = spotify.search_tracks(query) or []
     return {
