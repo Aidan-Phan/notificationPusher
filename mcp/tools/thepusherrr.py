@@ -1,18 +1,22 @@
+import os
 import requests
-from ..config import PUSHOVER_USER_KEY, PUSHOVER_API_TOKEN
+from ..config import PUSHOVER_API_TOKEN, PUSHOVER_USER_KEY
 
-def send_notification(title, message):
-    """
-    Send a push notification via Pushover.
-    """
-    data = {
+def send_notification(title: str, message: str):
+    # validate presence
+    if not PUSHOVER_API_TOKEN or not PUSHOVER_USER_KEY:
+        raise RuntimeError("Pushover credentials are missing.")
+
+    payload = {
         "token": PUSHOVER_API_TOKEN,
         "user": PUSHOVER_USER_KEY,
+        "message": message,
         "title": title,
-        "message": message
     }
-
-    response = requests.post("https://api.pushover.net/1/messages.json", data=data)
-    print("Pushover status:", response.status_code)
-    print("Pushover response:", response.json())
-    return response.json()
+    resp = requests.post("https://api.pushover.net/1/messages.json", data=payload)
+    try:
+        resp.raise_for_status()
+    except Exception:
+        # bubble error with body for debugging
+        raise RuntimeError(f"Pushover failed: {resp.status_code} {resp.text}")
+    return {"status_code": resp.status_code, "response": resp.json()}
