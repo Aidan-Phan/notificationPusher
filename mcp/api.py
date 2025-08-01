@@ -6,9 +6,27 @@ from spotipy.oauth2 import SpotifyOAuth
 from typing import Optional
 
 from mcp.tools import thepusherrr, spotify
-from mcp.config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECT_URI, validate as validate_spotify_config
-
+from mcp.config import (
+    SPOTIFY_CLIENT_ID,
+    SPOTIFY_CLIENT_SECRET,
+    SPOTIFY_REDIRECT_URI,
+    validate_spotify,
+    validate_pushover,
+)
 # validate Spotify config on startup so /auth/start fails with a clear error if something is missing
+try:
+    validate_spotify()
+except Exception as e:
+    print("Spotify config validation error:", e)
+    raise
+
+try:
+    validate_pushover()
+except Exception as e:
+    print("Pushover config validation error:", e)
+    # depending on tolerance you can continue or raise; raising will make /notify fail fast
+    # raise
+
 try:
     validate_spotify_config()
 except Exception as e:
